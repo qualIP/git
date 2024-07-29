@@ -339,6 +339,63 @@ gen_cmd () {
 	FINAL_CMD="-c \"set hidden diffopt-=hiddenoff | $CMD | tabfirst\""
 }
 
+# Returns whether this is a graphical Vim or Neovim variant
+_is_gvim() {
+	local git_editor_base=$1
+	case "$git_editor_base" in
+		*gvim)
+			# Vim GUI
+			return 0
+			;;
+		firenvim|neovide|goveovim|gnvim|fvim|nvy|VimR|nvim-qt)
+			# Neovim GUI
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# Returns whether this is a plain text Neovim variant
+_is_nvim() {
+	local git_editor_base=$1
+	_is_gvim "$git_editor_base" && return 1  # Only plain text!
+	case "$git_editor_base" in
+		*nvim)
+			# Neovim or variant thereof
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# Returns whether this is a plain text Vim variant
+_is_vim() {
+	local git_editor_base=$1
+	_is_gvim "$git_editor_base" && return 1  # Only plain text!
+	case "$git_editor_base" in
+		*vim|*nvim)
+			# Vim or variant thereof
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+_vim_arg_supported() {
+	local tool=$1
+	local arg=$2
+
+	# For test purposes, allow forcing the return value
+	[ -n "${_vim_arg_supported_return:-}" ] && return "$_vim_arg_supported_return"
+
+	"$tool" --help 2> /dev/null | grep -qw -- "$arg"
+}
 
 ################################################################################
 ## API functions (called from "git-mergetool--lib.sh")
@@ -490,15 +547,39 @@ merge_cmd_help () {
 
 
 translate_merge_tool_path () {
+	local git_editor=${GIT_EDITOR:-${EDITOR:-}}
+	# Get the base name...
+	local git_editor_base ; git_editor_base=`basename "$git_editor"`
+	# ...and remove common file name extensions.
+	git_editor_base="${git_editor_base%.AppImage}"
+	git_editor_base="${git_editor_base%.exe}"
 	case "$1" in
 	nvimdiff*)
-		echo nvim
+		if _is_nvim "$git_editor_base"
+		then
+			# GIT_EDITOR is already a plain text Neovim variant
+			echo "$git_editor"
+		else
+			echo nvim
+		fi
 		;;
 	gvimdiff*)
-		echo gvim
+		if _is_gvim "$git_editor_base" && `_vim_arg_supported "$GIT_EDITOR" -c`
+		then
+			# GIT_EDITOR is already a graphical Vim variant and supports -c
+			echo "$git_editor"
+		else
+			echo gvim
+		fi
 		;;
 	vimdiff*)
-		echo vim
+		if _is_vim "$git_editor_base"
+		then
+			# GIT_EDITOR is already a plain text Vim variant
+			echo "$git_editor"
+		else
+			echo vim
+		fi
 		;;
 	esac
 }
@@ -532,9 +613,13 @@ list_tool_variants () {
 ## Unit tests (called from scripts inside the "t" folder)
 ################################################################################
 
-run_unit_tests () {
-	# Function to make sure that we don't break anything when modifying this
-	# script.
+# Functions to make sure that we don't break anything when modifying this
+# script.
+
+run_unit_tests_layout () {
+	# Verify gen_cmd's composition of layouts
+
+	at_least_one_ko="false"
 
 	NUMBER_OF_TEST_CASES=16
 
@@ -589,8 +674,6 @@ run_unit_tests () {
 	EXPECTED_TARGET_15="MERGED"
 	EXPECTED_TARGET_16="MERGED"
 
-	at_least_one_ko="false"
-
 	for i in $(seq -w 1 99)
 	do
 		if test "$i" -gt $NUMBER_OF_TEST_CASES
@@ -613,6 +696,19 @@ run_unit_tests () {
 			at_least_one_ko="true"
 		fi
 	done
+
+	if test "$at_least_one_ko" = "true"
+	then
+		return 255
+	else
+		return 0
+	fi
+}
+
+run_unit_tests_merge_cmd () {
+	# Verify merge_cmd functionality
+
+	at_least_one_ko="false"
 
 	# verify that `merge_cmd` handles paths with spaces
 	record_parameters () {
@@ -649,4 +745,160 @@ run_unit_tests () {
 	else
 		return 0
 	fi
+}
+
+run_unit_tests_tool_path () {
+	# verify a compatible tool path is selected based on GIT_EDITOR or EDITOR environment variables
+
+	at_least_one_ko="false"
+
+	# For the purpose of this test, assume any argument (-c, --nofork) are
+	# supported as we'll be calling tools that may not exist on the test
+	# system.
+	_vim_arg_supported_return=0
+
+	# Check default tools paths
+	EDITOR=
+	GIT_EDITOR=
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	gvim
+	vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check proper tool used when GIT_EDITOR is just `vim`
+	EDITOR=
+	GIT_EDITOR=vim
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	gvim
+	vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check the GIT_EDITOR environment has priority
+	EDITOR=/some/other/bin/tool
+	GIT_EDITOR=/usr/local/bin/vim
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	gvim
+	/usr/local/bin/vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check the EDITOR environment is used by default
+	EDITOR=/usr/local/bin/vim
+	GIT_EDITOR=
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	gvim
+	/usr/local/bin/vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check `nvim` is a valid Vim variant
+	EDITOR=
+	GIT_EDITOR=nvim
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	gvim
+	nvim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check the full path is returned
+	EDITOR=
+	GIT_EDITOR=/usr/local/bin/nvim
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	/usr/local/bin/nvim
+	gvim
+	/usr/local/bin/nvim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check `gvim` is a valid graphical Vim variant but not suitable for plain text
+	EDITOR=
+	GIT_EDITOR=/usr/local/bin/gvim
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	/usr/local/bin/gvim
+	vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+	# Check a Neovim GUI is a valid graphical Vim variant
+	EDITOR=
+	GIT_EDITOR=nvim-qt
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	nvim-qt
+	vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+
+
+	# Check an unknown GUI that does not support -c
+	_vim_arg_supported_return=1
+	EDITOR=
+	GIT_EDITOR=some_variant_of_gvim
+	>actual
+	translate_merge_tool_path nvimdiff >> actual
+	translate_merge_tool_path gvimdiff >> actual
+	translate_merge_tool_path vimdiff >> actual
+	cat >expect <<-\EOF
+	nvim
+	gvim
+	vim
+	EOF
+	diff -u expect actual || at_least_one_ko=true
+	_vim_arg_supported_return=0  # restore
+
+	unset _vim_arg_supported_return
+
+	if test "$at_least_one_ko" = "true"
+	then
+		return 255
+	else
+		return 0
+	fi
+}
+
+run_unit_tests () {
+	# Runs all local tests at once. Only used for manual execution.
+	run_unit_tests_layout
+	run_unit_tests_merge_cmd
+	run_unit_tests_tool_path
 }
