@@ -345,7 +345,14 @@ gen_cmd () {
 ################################################################################
 
 diff_cmd () {
-	"$merge_tool_path" -R -f -d \
+
+	# Instead of passing -R, make temporary files non-writable and allow modifying local files.
+	local TMPDIR=${TMPDIR:-/tmp}
+	TMPDIR=${TMPDIR%/}
+	[ "${LOCAL#$TMPDIR/}" = "$LOCAL" ] || chmod a-w "$LOCAL"
+	[ "${REMOTE#$TMPDIR/}" = "$REMOTE" ] || chmod a-w "$REMOTE"
+
+	"$merge_tool_path" -f -d \
 		-c 'wincmd l' -c 'cd $GIT_PREFIX' "$LOCAL" "$REMOTE"
 }
 
