@@ -397,6 +397,43 @@ _vim_arg_supported() {
 	"$tool" --help 2> /dev/null | grep -qw -- "$arg"
 }
 
+# Returns the base name of a tool.
+# Directory component and common extensions are removed.
+# This is used to simplify comparisons.
+_vim_tool_base_name() {
+	local path=$1
+
+	# Strip directory
+	path=`basename "$path"`
+
+	# Remove common file name extensions
+	path=${path%.AppImage}
+	path=${path%.exe}
+
+	echo "$path"
+}
+
+_vim_nofork_arg() {
+	local merge_tool_path=$1
+	case "`_vim_tool_base_name "$merge_tool_path"`" in
+		vim|nvim|gvim)
+			# Tools which are known to support -f
+			echo -f
+			;;
+		*)
+			# Variants which may not support -f
+			if `_vim_arg_supported "$merge_tool_path" --nofork` ; then
+				# This tool supports --nofork, possibly it doesn't support -f
+				echo --nofork
+			else
+				# Assume it supports -f, or at least ignores it
+				echo -f
+			fi
+			;;
+	esac
+}
+
+
 ################################################################################
 ## API functions (called from "git-mergetool--lib.sh")
 ################################################################################
@@ -409,7 +446,8 @@ diff_cmd () {
 	[ "${LOCAL#$TMPDIR/}" = "$LOCAL" ] || chmod a-w "$LOCAL"
 	[ "${REMOTE#$TMPDIR/}" = "$REMOTE" ] || chmod a-w "$REMOTE"
 
-	"$merge_tool_path" -f -d \
+	"$merge_tool_path" -d \
+		`_vim_nofork_arg "$merge_tool_path"` \
 		-c 'wincmd l' -c 'cd $GIT_PREFIX' "$LOCAL" "$REMOTE"
 }
 
@@ -472,7 +510,8 @@ merge_cmd () {
 	if $base_present
 	then
 		eval '"$merge_tool_path"' \
-			-f "$FINAL_CMD" '"$LOCAL"' '"$BASE"' '"$REMOTE"' '"$MERGED"'
+			`_vim_nofork_arg "$merge_tool_path"` \
+			"$FINAL_CMD" '"$LOCAL"' '"$BASE"' '"$REMOTE"' '"$MERGED"'
 	else
 		# If there is no BASE (example: a merge conflict in a new file
 		# with the same name created in both braches which didn't exist
@@ -482,7 +521,8 @@ merge_cmd () {
 			sed -e 's:2b:quit:g' -e 's:3b:2b:g' -e 's:4b:3b:g')
 
 		eval '"$merge_tool_path"' \
-			-f "$FINAL_CMD" '"$LOCAL"' '"$REMOTE"' '"$MERGED"'
+			`_vim_nofork_arg "$merge_tool_path"` \
+			"$FINAL_CMD" '"$LOCAL"' '"$REMOTE"' '"$MERGED"'
 	fi
 
 	ret="$?"
@@ -548,11 +588,7 @@ merge_cmd_help () {
 
 translate_merge_tool_path () {
 	local git_editor=${GIT_EDITOR:-${EDITOR:-}}
-	# Get the base name...
-	local git_editor_base ; git_editor_base=`basename "$git_editor"`
-	# ...and remove common file name extensions.
-	git_editor_base="${git_editor_base%.AppImage}"
-	git_editor_base="${git_editor_base%.exe}"
+	local git_editor_base ; git_editor_base=`_vim_tool_base_name "$git_editor"`
 	case "$1" in
 	nvimdiff*)
 		if _is_nvim "$git_editor_base"
@@ -711,12 +747,16 @@ run_unit_tests_merge_cmd () {
 	at_least_one_ko="false"
 
 	# verify that `merge_cmd` handles paths with spaces
+	>actual
 	record_parameters () {
-		>actual
 		for arg
 		do
 			echo "$arg" >>actual
 		done
+		if [ "$arg" = "--help" ] ; then
+			echo "-c is suported"
+			echo "--nofork is suported"
+		fi
 	}
 
 	base_present=false
@@ -728,8 +768,10 @@ run_unit_tests_merge_cmd () {
 
 	merge_cmd vimdiff || at_least_one_ko=true
 
+	# record_parameters will be called with `--help` once to test for `--nofork` support
 	cat >expect <<-\EOF
-	-f
+	--help
+	--nofork
 	-c
 	set hidden diffopt-=hiddenoff | echo | leftabove split | leftabove vertical split | 1b | wincmd l | leftabove vertical split | quit | wincmd l | 2b | wincmd j | 3b | execute 'tabdo windo diffthis' | tabfirst
 	lo cal
